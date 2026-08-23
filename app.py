@@ -18,15 +18,20 @@ LOGO_B64 = "iVBORw0KGgoAAAANSUhEUgAAA3EAAANoCAYAAACpW39XAAAABHNCSVQICAgIfAhkiAAA
 st.markdown(
     """
     <style>
-        /* Ocultar barra superior de GitHub/Menú sin romper el botón de la barra lateral */
-        [data-testid="stToolbar"] { visibility: hidden; height: 0px; position: fixed; }
+        /* Ocultar menú principal, footer y botones de Deploy/GitHub */
         #MainMenu { visibility: hidden; }
         footer { visibility: hidden; }
+        [data-testid="stAppDeployButton"] { display: none !important; }
+        [data-testid="stToolbarActions"] { display: none !important; }
+        /* Hacer el header transparente para que no moleste visualmente pero mantenga activa la sidebar */
+        header[data-testid="stHeader"] {
+        background: transparent !important;
+        }
         
         /* Paleta de colores y fuentes */
         .main-header {
             font-size: 2.1rem;
-            color: #0F172A;
+            color: #4A90E2;
             font-weight: 800;
             margin-bottom: 0.1rem;
             letter-spacing: -0.5px;
@@ -269,7 +274,7 @@ with col_mat_A:
   )
 
 with col_vec_b:
-  st.subheader("Vector de Cargas Nodeales $[b]$")
+  st.subheader("Vector de Cargas Nodales $[b]$")
   edited_b = st.data_editor(
       df_b_init, key="editor_b_reticulados", use_container_width=True
   )
