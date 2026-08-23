@@ -1,11 +1,10 @@
-import time
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Solver de Matrices ´n´ incognitas",
-    page_icon="🧮",
+    page_title="Resolutor de Reticulados - Método de los Nodos",
+    page_icon="🏗️",
     layout="wide",
 )
 
@@ -20,225 +19,207 @@ st.markdown(
 )
 
 st.markdown(
-    '<div class="main-header">🧮 Solver de Matrices ´n´ incognitas (Ax = b)</div>',
+    '<div class="main-header">🏗️ Solver de Reticulados: Equilibrio de Nodos'
+    ' [A]x = b</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="sub-header">Soporta desde sistemas pequeños hasta matrices gigantes (ej. 500x500)</div>',
+    '<div class="sub-header">Análisis de Estabilidad y Resolución de Fuerzas'
+    ' Internas y Reacciones</div>',
     unsafe_allow_html=True,
 )
 
-# Sidebar
-st.sidebar.header("⚙️ Modo de Ingreso de Datos")
-modo_ingreso = st.sidebar.radio(
-    "Selecciona cómo ingresar el sistema:",
-    [
-        "📊 Tabla Interactiva (Sistemas pequeños)",
-        "📝 Pegar Texto (Espacios / Comas)",
-        "📁 Subir Archivo CSV",
-        "🎲 Generador Aleatorio (Prueba de rendimiento)",
-    ],
+# --- TEORÍA DE RETICULADOS (Basada en las filminas de la cátedra) ---
+with st.expander(
+    "📖 **Ver Fundamento Teórico y Clasificación de Equilibrio**", expanded=False
+):
+  st.markdown("""
+    ### Recordemos: $[A] x = b$
+    En el método de los nodos para reticulados planos:
+    - **$[A]$**: Matriz de coeficientes directores de las barras y componentes de reacciones en cada nodo.
+    - **$x$**: Vector de incógnitas (Fuerzas internas de barras $B_{ij}$ y Reacciones de apoyo $R_k$).
+    - **$b$**: Vector de cargas externas aplicadas en los nodos ($\Sigma F_x$, $\Sigma F_y$).
+    
+    ---
+    
+    ### Criterio de Rouché-Frobenius Aplicado a Estructuras:
+    
+    | Condición Matemática | Condición Estructural | Estado de Equilibrio |
+    | :--- | :--- | :--- |
+    | **$\text{Rango}(A) = \text{Rango}(A:b) = n$** | **Solución Única** | **LOGRA EL EQUILIBRIO** (Estructura Isostática) |
+    | **$\text{Rango}(A) = \text{Rango}(A:b) < n$** | **Infinitas soluciones** | **LOGRA EL EQUILIBRIO** (Estructura Hiperestática) |
+    | **$\text{Rango}(A) \\neq \text{Rango}(A:b)$** | **No existe solución** | **NO LOGRA EL EQUILIBRIO** (Mecanismo / Hipostática) |
+    
+    - **Sistema Compatible:** Un sistema es compatible cuando **se puede lograr el equilibrio**.
+    - **Sistema Incompatible:** Un sistema es incompatible cuando **no es posible lograr el equilibrio**.
+    """)
+
+# --- CONFIGURACIÓN DEL RETICULADO ---
+st.sidebar.header("⚙️ Configuración del Reticulado")
+
+num_nodos = st.sidebar.number_input(
+    "Número de Nodos (N)", min_value=1, max_value=50, value=6, step=1
 )
 
-A = None
-b = None
+default_barras = "B12, B23, B34, B45, B56, B16, B15, B25, B35"
+default_reacciones = "R1, R4x, R4y"
 
-# -------------------------------------------------------------
-# MODO 1: TABLA INTERACTIVA
-# -------------------------------------------------------------
-if modo_ingreso == "📊 Tabla Interactiva (Sistemas pequeños)":
-  st.subheader("Ingreso mediante Tabla")
-  c1, c2 = st.columns(2)
-  rows = c1.number_input("Número de filas (m)", min_value=1, value=2, step=1)
-  cols = c2.number_input(
-      "Número de columnas / incógnitas (n)", min_value=1, value=2, step=1
+barras_str = st.sidebar.text_input(
+    "Nombres de Barras (separadas por comas):", value=default_barras
+)
+reacciones_str = st.sidebar.text_input(
+    "Nombres de Reacciones (separadas por comas):", value=default_reacciones
+)
+
+# Procesar nombres
+barras = [b.strip() for b in barras_str.split(",") if b.strip()]
+reacciones = [r.strip() for r in reacciones_str.split(",") if r.strip()]
+
+columnas_x = barras + reacciones
+num_incognitas = len(columnas_x)
+
+filas_eq = []
+for i in range(1, num_nodos + 1):
+  filas_eq.append(f"Nodo {i} - ΣFx")
+  filas_eq.append(f"Nodo {i} - ΣFy")
+
+num_ecuaciones = len(filas_eq)
+
+st.write("### 📝 Sistema de Ecuaciones del Reticulado")
+st.write(
+    f"**Ecuaciones totales:** {num_ecuaciones} ({num_nodos} nodos × 2 ejes) |"
+    f" **Incógnitas totales:** {num_incognitas} ({len(barras)} barras +"
+    f" {len(reacciones)} reacciones)"
+)
+
+# Cargar el ejemplo de la foto
+cargar_ejemplo = st.checkbox(
+    "Cargar ejemplo exacto de la foto (6 nodos, 9 barras, 3 reacciones)"
+)
+
+if cargar_ejemplo:
+  num_nodos = 6
+  default_A_data = [
+      [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071, 0.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.7071, 0.0, 0.0, 1.0, 0.0, 0.0],
+      [-1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.7071, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+      [0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+      [0.0, 0.0, 0.0, 1.0, -1.0, 0.0, -0.7071, 0.0, 0.7071, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.7071, -1.0, -0.7071, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+  ]
+  default_b_data = [0, 0, 0, 16, 0, 0, 0, 0, 0, 0, -12, 0]
+
+  df_A_init = pd.DataFrame(default_A_data, index=filas_eq, columns=columnas_x)
+  df_b_init = pd.DataFrame(
+      default_b_data, index=filas_eq, columns=["Cargas Ext. (b)"]
+  )
+else:
+  df_A_init = pd.DataFrame(
+      np.zeros((num_ecuaciones, num_incognitas)),
+      index=filas_eq,
+      columns=columnas_x,
+  )
+  df_b_init = pd.DataFrame(
+      np.zeros((num_ecuaciones, 1)), index=filas_eq, columns=["Cargas Ext. (b)"]
   )
 
-  col_a, col_b = st.columns([3, 1.2])
-  with col_a:
-    st.write("**Matriz A**")
-    df_A = pd.DataFrame(
-        np.zeros((rows, cols)), columns=[f"x_{i+1}" for i in range(cols)]
-    )
-    edited_A = st.data_editor(df_A, key="editor_A", use_container_width=True)
-    A = edited_A.to_numpy(dtype=float)
+col_mat_A, col_vec_b = st.columns([3.5, 1.2])
 
-  with col_b:
-    st.write("**Vector b**")
-    df_b = pd.DataFrame(np.zeros((rows, 1)), columns=["Término Indep. (b)"])
-    edited_b = st.data_editor(df_b, key="editor_b", use_container_width=True)
+with col_mat_A:
+  st.subheader("Matriz de Coeficientes $[A]$")
+  edited_A = st.data_editor(
+      df_A_init, key="editor_A_reticulados", use_container_width=True
+  )
+
+with col_vec_b:
+  st.subheader("Vector de Cargas $[b]$")
+  edited_b = st.data_editor(
+      df_b_init, key="editor_b_reticulados", use_container_width=True
+  )
+
+# --- BOTÓN DE CÁLCULO ---
+if st.button(
+    "🚀 Resolver Equilibrio del Reticulado",
+    type="primary",
+    use_container_width=True,
+):
+  try:
+    A = edited_A.to_numpy(dtype=float)
     b = edited_b.to_numpy(dtype=float).flatten()
 
-# -------------------------------------------------------------
-# MODO 2: PEGAR TEXTO (Fiel a tu Colab original)
-# -------------------------------------------------------------
-elif modo_ingreso == "📝 Pegar Texto (Espacios / Comas)":
-  st.subheader("Ingreso por Bloque de Texto")
-  st.write(
-      "Ingresa una fila por línea. Separa los elementos de cada fila con"
-      " espacios o comas."
-  )
+    rank_A = int(np.linalg.matrix_rank(A))
+    n_unknowns = A.shape[1]
+    b_reshaped = b.reshape(-1, 1)
+    augmented_matrix = np.hstack((A, b_reshaped))
+    rank_Ab = int(np.linalg.matrix_rank(augmented_matrix))
 
-  text_A = st.text_area(
-      "Elementos de la Matriz A (Fila por fila):",
-      value="2 1\n1 3",
-      height=150,
-  )
-  text_b = st.text_area(
-      "Elementos del Vector b (Separados por espacio o línea por línea):",
-      value="5 10",
-      height=80,
-  )
+    st.divider()
+    st.write("### 📊 Resultados del Análisis Estructural")
 
-  if text_A and text_b:
-    try:
-      # Parse A
-      lines_A = text_A.strip().split("\n")
-      matrix_a = []
-      for line in lines_A:
-        clean_line = line.replace(",", " ").split()
-        if clean_line:
-          matrix_a.append([float(val) for val in clean_line])
-      A = np.array(matrix_a)
+    c_rA, c_rAb, c_n = st.columns(3)
+    c_rA.metric("Rango de [A]", rank_A)
+    c_rAb.metric("Rango de [A:b]", rank_Ab)
+    c_n.metric("Nº Incógnitas (n)", n_unknowns)
 
-      # Parse b
-      clean_b = text_b.replace(",", " ").replace("\n", " ").split()
-      b = np.array([float(val) for val in clean_b])
+    st.subheader("Estado de Equilibrio del Sistema")
 
-      st.info(
-          f" Matriz A detectada de dimensión: **{A.shape[0]} x {A.shape[1]}**"
-          f" | Vector b de longitud: **{len(b)}**"
-      )
-    except Exception as e:
-      st.error(f"Error al procesar el texto: {str(e)}")
+    if rank_A == rank_Ab:
+      if rank_A == n_unknowns:
+        st.success(
+            "✅ **LOGRA EL EQUILIBRIO - Solución Única (Sistema Isostático)**"
+        )
+        st.write(
+            "El reticulado es estable e isostático. Existe un único conjunto"
+            " de fuerzas internas y reacciones que garantizan el equilibrio."
+        )
 
-# -------------------------------------------------------------
-# MODO 3: SUBIR ARCHIVO CSV
-# -------------------------------------------------------------
-elif modo_ingreso == "📁 Subir Archivo CSV":
-  st.subheader("Cargar Matrices desde Archivos CSV")
-  file_A = st.file_uploader(
-      "Subir Matriz A (CSV sin encabezados)", type=["csv", "txt"]
-  )
-  file_b = st.file_uploader(
-      "Subir Vector b (CSV sin encabezados)", type=["csv", "txt"]
-  )
+        x = np.linalg.solve(A, b)
 
-  if file_A and file_b:
-    try:
-      A = pd.read_csv(file_A, header=None).to_numpy(dtype=float)
-      b = pd.read_csv(file_b, header=None).to_numpy(dtype=float).flatten()
-      st.success(
-          f" Archivos cargados correctamente. Dimensión de A:"
-          f" **{A.shape[0]}x{A.shape[1]}**"
-      )
-    except Exception as e:
-      st.error(f"Error al leer los archivos: {str(e)}")
+        res_df = pd.DataFrame({
+            "Incógnita / Componente": columnas_x,
+            "Tipo": [
+                "Fuerza en Barra" if col in barras else "Reacción de Apoyo"
+                for col in columnas_x
+            ],
+            "Valor Calculado": [f"{val:.4f}" for val in x],
+        })
 
-# -------------------------------------------------------------
-# MODO 4: GENERADOR ALEATORIO (Para matrices gigantes 500x500)
-# -------------------------------------------------------------
-elif modo_ingreso == "🎲 Generador Aleatorio (Prueba de rendimiento)":
-  st.subheader("Generador de Matrices Gigantes")
-  st.write(
-      "Prueba la capacidad del sistema para resolver matrices de gran escala"
-      " (ej. 100x100, 500x500)."
-  )
+        st.write("#### 🎯 Resultados de Fuerzas Internas y Reacciones:")
+        st.table(res_df)
 
-  dim = st.number_input(
-      "Tamaño de la matriz cuadrada (N x N)",
-      min_value=2,
-      max_value=2000,
-      value=500,
-      step=50,
-  )
-
-  if st.button("🎲 Generar Matriz Aleatoria"):
-    with st.spinner(f"Generando matriz de {dim} x {dim}..."):
-      st.session_state["A_gen"] = np.random.uniform(-10, 10, size=(dim, dim))
-      st.session_state["b_gen"] = np.random.uniform(-10, 10, size=dim)
-
-  if "A_gen" in st.session_state and st.session_state["A_gen"].shape[0] == dim:
-    A = st.session_state["A_gen"]
-    b = st.session_state["b_gen"]
-    st.info(f" Matriz generada de **{dim} x {dim}** ({dim*dim:,} elementos).")
-
-# -------------------------------------------------------------
-# RESOLUCIÓN Y ANÁLISIS DEL SISTEMA
-# -------------------------------------------------------------
-if A is not None and b is not None:
-  st.divider()
-
-  if A.shape[0] != len(b):
-    st.error(
-        f"❌ **Error de dimensiones:** El número de filas de A ({A.shape[0]})"
-        f" no coincide con el tamaño del vector b ({len(b)})."
-    )
-  else:
-    if st.button(
-        "🚀 Calcular y Resolver Sistema", type="primary", use_container_width=True
-    ):
-      start_time = time.time()
-
-      # Cálculo de rangos
-      rank_A = int(np.linalg.matrix_rank(A))
-      n_unknowns = int(A.shape[1])
-      b_reshaped = b.reshape(-1, 1)
-      augmented_matrix = np.hstack((A, b_reshaped))
-      rank_Ab = int(np.linalg.matrix_rank(augmented_matrix))
-
-      exec_time = time.time() - start_time
-
-      st.write("### 📊 Resultados del Análisis")
-
-      m1, m2, m3, m4 = st.columns(4)
-      m1.metric("Rango de A", rank_A)
-      m2.metric("Rango de [A|b]", rank_Ab)
-      m3.metric("Nº Incógnitas (n)", n_unknowns)
-      m4.metric("Tiempo de Cálculo", f"{exec_time:.4f} seg")
-
-      st.subheader("Clasificación del Sistema")
-
-      if rank_A == rank_Ab:
-        if rank_A == n_unknowns:
-          st.success("✅ **Sistema Compatible Determinado (Solución Única)**")
-          x = np.linalg.solve(A, b)
-
-          st.write("#### 🎯 Vector Incógnita Solución (x):")
-          if len(x) <= 20:
-            res_df = pd.DataFrame({
-                "Incógnita": [f"x_{i+1}" for i in range(len(x))],
-                "Valor": [f"{val:.6f}" for val in x],
-            })
-            st.table(res_df)
-          else:
-            st.write(
-                f"*(Mostrando los primeros 20 elementos de los {len(x)}"
-                " totales)*"
-            )
-            res_df = pd.DataFrame({
-                "Incógnita": [f"x_{i+1}" for i in range(20)],
-                "Valor": [f"{val:.6f}" for val in x[:20]],
-            })
-            st.table(res_df)
-
-            # Opción para descargar la solución completa
-            csv_sol = pd.DataFrame(
-                x, columns=["Solucion"]
-            ).to_csv(index=False)
-            st.download_button(
-                "📥 Descargar Solución Completa (CSV)",
-                data=csv_sol,
-                file_name="solucion_x.csv",
-                mime="text/csv",
-            )
-
-        else:
-          st.warning(
-              "⚠️ **Sistema Compatible Indeterminado (Infinitas Soluciones)**"
-          )
-          x = np.linalg.lstsq(A, b, rcond=None)[0]
-          st.write("#### 🎯 Una solución particular:")
-          st.write(x[:20] if len(x) > 20 else x)
       else:
-        st.error("❌ **Sistema Incompatible (Sin Solución)**")
+        st.warning(
+            "⚠️ **LOGRA EL EQUILIBRIO - Infinitas Soluciones (Sistema"
+            " Hiperestático)**"
+        )
+        st.write(
+            "El reticulado es hiperestático. Posee más incógnitas que"
+            " ecuaciones de equilibrio independientes."
+        )
+
+        x = np.linalg.lstsq(A, b, rcond=None)[0]
+
+        res_df = pd.DataFrame({
+            "Incógnita / Componente": columnas_x,
+            "Solución Particular": [f"{val:.4f}" for val in x],
+        })
+        st.write("#### 🎯 Solución Particular (Mínimos Cuadrados):")
+        st.table(res_df)
+    else:
+      st.error(
+          "❌ **NO LOGRA EL EQUILIBRIO - Sin Solución (Sistema Incompatible)**"
+      )
+      st.write(
+          "El sistema es **incompatible / hipostático (mecanismo)**. Las"
+          " cargas externas aplicadas no pueden ser equilibradas por la"
+          " disposición de barras y apoyos actual."
+      )
+
+  except Exception as e:
+    st.error(f"Error en los cálculos: {str(e)}")
