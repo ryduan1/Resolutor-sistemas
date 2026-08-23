@@ -17,10 +17,16 @@ LOGO_B64 = "iVBORw0KGgoAAAANSUhEUgAAAk8AAANYCAMAAADqvfnLAAAABGdBTUEAAK/INwWK6QAA
 st.markdown(
     """
     <style>
-        /* Ocultar barra superior de GitHub/Menú sin romper el botón de la barra lateral */
-        [data-testid="stToolbar"] { visibility: hidden; height: 0px; position: fixed; }
-        #MainMenu { visibility: hidden; }
-        footer { visibility: hidden; }
+        /* Ocultar menú principal, footer y botones de Deploy/GitHub */
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+[data-testid="stAppDeployButton"] { display: none !important; }
+[data-testid="stToolbarActions"] { display: none !important; }
+
+/* Hacer el header transparente para que no moleste visualmente pero mantenga activa la sidebar */
+header[data-testid="stHeader"] {
+    background: transparent !important;
+}
         
         /* Paleta de colores y fuentes */
         .main-header {
