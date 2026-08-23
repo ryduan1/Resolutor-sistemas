@@ -280,9 +280,9 @@ st.markdown(
     """
     <div class="custom-footer">
         <b>Desarrollado para la Cátedra de Estática y Resistencia de los Materiales (Cód.0318)</b><br>
-        Facultad de Ingeniería — Universidad Nacional de Río Cuarto (UNRC)<br><br> 
+        Facultad de Ingeniería — Universidad Nacional de Río Cuarto (UNRC)<br><br>
         <b>Autor:</b> Estudiante de Ingeniería Ryduan Maximiliano Arévalo Castellano<br>
-        <b>Contacto:</b> <a href="mailto:ryduare@gmail.com">ryduare@gmail.com</a>
+        <b>Contacto Autor:</b> <a href="mailto:ryduare@gmail.com">ryduare@gmail.com</a> &nbsp;•&nbsp; <b>Contacto Cátedra:</b> <a href="mailto:regalum@ing.unrc.edu.ar">regalum@ing.unrc.edu.ar</a>
     </div>
 """,
     unsafe_allow_html=True,
