@@ -7,27 +7,17 @@ st.set_page_config(
     page_icon="🏗️",
     layout="wide",
 )
-# Estilos visuales
+
+# Estilos visuales + Ocultar barra superior / GitHub / Menú
 st.markdown(
     """
 <style>
-    /* Ocultar barra superior, botón Share, ícono de GitHub y menú */
     header {visibility: hidden;}
     [data-testid="stHeader"] {display: none;}
     [data-testid="stToolbar"] {display: none;}
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 
-    /* Estilos de la aplicación */
-    .main-header { font-size: 2.2rem; color: #1E3A8A; font-weight: 700; margin-bottom: 0.2rem; }
-    .sub-header { font-size: 1.1rem; color: #4B5563; margin-bottom: 1.5rem; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-st.markdown(
-    """
-<style>
     .main-header { font-size: 2.2rem; color: #1E3A8A; font-weight: 700; margin-bottom: 0.2rem; }
     .sub-header { font-size: 1.1rem; color: #4B5563; margin-bottom: 1.5rem; }
 </style>
@@ -46,7 +36,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- TEORÍA DE RETICULADOS (Basada en las filminas de la cátedra) ---
+# --- TEORÍA DE RETICULADOS ---
 with st.expander(
     "📖 **Ver Fundamento Teórico y Clasificación de Equilibrio**", expanded=False
 ):
@@ -71,15 +61,31 @@ with st.expander(
     - **Sistema Incompatible:** Un sistema es incompatible cuando **no es posible lograr el equilibrio**.
     """)
 
+# --- CHECKBOX DE EJEMPLO DE LA CÁTEDRA (PRIMERO) ---
+cargar_ejemplo = st.checkbox(
+    "📌 Cargar ejemplo teórico de la cátedra (6 nodos, 9 barras, 3 reacciones)"
+)
+
+# Definir valores por defecto según el checkbox
+if cargar_ejemplo:
+  default_nodos = 6
+  default_barras = "B12, B23, B34, B45, B56, B16, B15, B25, B35"
+  default_reacciones = "R1, R4x, R4y"
+else:
+  default_nodos = 3
+  default_barras = "B12, B23, B13"
+  default_reacciones = "R1x, R1y, R2"
+
 # --- CONFIGURACIÓN DEL RETICULADO EN BARRA LATERAL ---
 st.sidebar.header("⚙️ Configuración del Reticulado")
 
 num_nodos = st.sidebar.number_input(
-    "Número de Nodos (N)", min_value=1, max_value=50, value=6, step=1
+    "Número de Nodos (N)",
+    min_value=1,
+    max_value=50,
+    value=default_nodos,
+    step=1,
 )
-
-default_barras = "B12, B23, B34, B45, B56, B16, B15, B25, B35"
-default_reacciones = "R1, R4x, R4y"
 
 barras_str = st.sidebar.text_input(
     "Nombres de Barras (separadas por comas):", value=default_barras
@@ -98,7 +104,7 @@ max_barras_posibles = (
     int(num_nodos * (num_nodos - 1) / 2) if num_nodos >= 2 else 0
 )
 
-# --- VALIDACIONES DE REGLAS ESTRUCTURALES EN BARRA LATERAL ---
+# --- VALIDACIONES DE REGLAS ESTRUCTURALES ---
 st.sidebar.divider()
 st.sidebar.subheader("📐 Validaciones Geométricas")
 
@@ -117,7 +123,7 @@ else:
   if grado_libertad < 0:
     st.sidebar.error(
         f"🔴 **b + r < 2N** (Hipostático / Mecanismo)\nFaltan"
-        f" {abs(grado_libertad)} elemento(s) para estabilidad previa."
+        f" {abs(grado_libertad)} elemento(s) para estabilidad."
     )
   elif grado_libertad == 0:
     st.sidebar.success(
@@ -147,13 +153,8 @@ st.write(
     " reacciones)"
 )
 
-# Checkbox actualizado con nueva descripción
-cargar_ejemplo = st.checkbox(
-    "Cargar ejemplo teórico de la cátedra (6 nodos, 9 barras, 3 reacciones)"
-)
-
-if cargar_ejemplo:
-  num_nodos = 6
+# Carga de datos de la matriz según el estado del checkbox
+if cargar_ejemplo and num_nodos == 6 and num_incognitas == 12:
   default_A_data = [
       [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071, 0.0, 0.0, 0.0, 0.0, 0.0],
       [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.7071, 0.0, 0.0, 1.0, 0.0, 0.0],
@@ -169,7 +170,6 @@ if cargar_ejemplo:
       [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
   ]
   default_b_data = [0, 0, 0, 16, 0, 0, 0, 0, 0, 0, -12, 0]
-
   df_A_init = pd.DataFrame(default_A_data, index=filas_eq, columns=columnas_x)
   df_b_init = pd.DataFrame(
       default_b_data, index=filas_eq, columns=["Cargas Ext. (b)"]
