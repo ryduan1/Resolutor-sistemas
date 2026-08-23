@@ -7,14 +7,24 @@ st.set_page_config(
     page_icon="🏗️",
     layout="wide",
 )
-
 # Estilos visuales
-/* Ocultar la barra superior, el ícono de GitHub y el menú de Streamlit */
-header {visibility: hidden;}
-[data-testid="stHeader"] {display: none;}
-[data-testid="stToolbar"] {display: none;}
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
+st.markdown(
+    """
+<style>
+    /* Ocultar barra superior, botón Share, ícono de GitHub y menú */
+    header {visibility: hidden;}
+    [data-testid="stHeader"] {display: none;}
+    [data-testid="stToolbar"] {display: none;}
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+
+    /* Estilos de la aplicación */
+    .main-header { font-size: 2.2rem; color: #1E3A8A; font-weight: 700; margin-bottom: 0.2rem; }
+    .sub-header { font-size: 1.1rem; color: #4B5563; margin-bottom: 1.5rem; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
 st.markdown(
     """
 <style>
