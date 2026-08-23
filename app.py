@@ -273,7 +273,7 @@ if st.button("🚀 Resolver Equilibrio del Reticulado", type="primary", use_cont
 st.markdown(
     """
     <div class="custom-footer">
-        <b>Desarrollado para la Cátedra de Estructuras / Mecánica del Continuo</b><br>
+        <b>Desarrollado para la Cátedra de Estática y Resistencia de los Materiales (Cód.0318)</b><br>
         Facultad de Ingeniería — Universidad Nacional de Río Cuarto (UNRC)<br><br>
         <b>Autor:</b> Estudiante de Ingeniería Ryduan Maximiliano Arévalo Castellano<br>
         <b>Contacto:</b> <a href="mailto:ryduare@gmail.com">ryduare@gmail.com</a>
