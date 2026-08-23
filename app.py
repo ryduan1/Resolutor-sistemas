@@ -8,6 +8,7 @@ st.set_page_config(
     layout="wide",
 )
 
+# Estilos visuales
 st.markdown(
     """
 <style>
@@ -54,7 +55,7 @@ with st.expander(
     - **Sistema Incompatible:** Un sistema es incompatible cuando **no es posible lograr el equilibrio**.
     """)
 
-# --- CONFIGURACIÓN DEL RETICULADO ---
+# --- CONFIGURACIÓN DEL RETICULADO EN BARRA LATERAL ---
 st.sidebar.header("⚙️ Configuración del Reticulado")
 
 num_nodos = st.sidebar.number_input(
@@ -71,10 +72,48 @@ reacciones_str = st.sidebar.text_input(
     "Nombres de Reacciones (separadas por comas):", value=default_reacciones
 )
 
-# Procesar nombres
+# Procesar nombres de variables
 barras = [b.strip() for b in barras_str.split(",") if b.strip()]
 reacciones = [r.strip() for r in reacciones_str.split(",") if r.strip()]
 
+b_count = len(barras)
+r_count = len(reacciones)
+max_barras_posibles = (
+    int(num_nodos * (num_nodos - 1) / 2) if num_nodos >= 2 else 0
+)
+
+# --- VALIDACIONES DE REGLAS ESTRUCTURALES EN BARRA LATERAL ---
+st.sidebar.divider()
+st.sidebar.subheader("📐 Validaciones Geométricas")
+
+if num_nodos < 2:
+  st.sidebar.error("❌ Un reticulado requiere al menos 2 nodos para existir.")
+elif b_count > max_barras_posibles:
+  st.sidebar.warning(
+      f"⚠️ Para {num_nodos} nodos, el máximo geométrico de barras sin duplicar"
+      f" es {max_barras_posibles}."
+  )
+else:
+  grado_libertad = (b_count + r_count) - (2 * num_nodos)
+  st.sidebar.write(f"**Ecuaciones ($2N$):** {2*num_nodos}")
+  st.sidebar.write(f"**Incógnitas ($b+r$):** {b_count + r_count}")
+
+  if grado_libertad < 0:
+    st.sidebar.error(
+        f"🔴 **b + r < 2N** (Hipostático / Mecanismo)\nFaltan"
+        f" {abs(grado_libertad)} elemento(s) para estabilidad previa."
+    )
+  elif grado_libertad == 0:
+    st.sidebar.success(
+        "🟢 **b + r = 2N**\nCumple la condición necesaria de Isostaticidad."
+    )
+  else:
+    st.sidebar.info(
+        f"🔵 **b + r > 2N** (Hiperestático)\nTiene {grado_libertad} elemento(s)"
+        " redundante(s)."
+    )
+
+# Columnas e Index para DataFrames
 columnas_x = barras + reacciones
 num_incognitas = len(columnas_x)
 
@@ -88,13 +127,13 @@ num_ecuaciones = len(filas_eq)
 st.write("### 📝 Sistema de Ecuaciones del Reticulado")
 st.write(
     f"**Ecuaciones totales:** {num_ecuaciones} ({num_nodos} nodos × 2 ejes) |"
-    f" **Incógnitas totales:** {num_incognitas} ({len(barras)} barras +"
-    f" {len(reacciones)} reacciones)"
+    f" **Incógnitas totales:** {num_incognitas} ({b_count} barras + {r_count}"
+    " reacciones)"
 )
 
-# Cargar el ejemplo de la foto
+# Checkbox actualizado con nueva descripción
 cargar_ejemplo = st.checkbox(
-    "Cargar ejemplo exacto de la foto (6 nodos, 9 barras, 3 reacciones)"
+    "Cargar ejemplo teórico de la cátedra (6 nodos, 9 barras, 3 reacciones)"
 )
 
 if cargar_ejemplo:
@@ -143,7 +182,7 @@ with col_vec_b:
       df_b_init, key="editor_b_reticulados", use_container_width=True
   )
 
-# --- BOTÓN DE CÁLCULO ---
+# --- BOTÓN DE CÁLCULO Y DIAGNÓSTICO ---
 if st.button(
     "🚀 Resolver Equilibrio del Reticulado",
     type="primary",
