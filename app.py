@@ -16,6 +16,8 @@ LOGO_B64 = "iVBORw0KGgoAAAANSUhEUgAAAk8AAANYCAMAAADqvfnLAAAABGdBTUEAAK/INwWK6QAA
 # --- ESTILOS CSS PROFESIONALES (TEMA INGENIERÍA) ---
 st.markdown(
     """
+    <!-- Etiqueta de verificación para Google Search Console -->
+    <meta name="google-site-verification" content="google-site-verification: googledf45c92ee4b1c25c.html" />
     <style>
         /* Ocultar menú principal, footer y botones de Deploy/GitHub */
 #MainMenu { visibility: hidden; }
