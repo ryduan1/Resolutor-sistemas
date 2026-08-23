@@ -9,6 +9,12 @@ st.set_page_config(
 )
 
 # Estilos visuales
+/* Ocultar la barra superior, el ícono de GitHub y el menú de Streamlit */
+header {visibility: hidden;}
+[data-testid="stHeader"] {display: none;}
+[data-testid="stToolbar"] {display: none;}
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
 st.markdown(
     """
 <style>
