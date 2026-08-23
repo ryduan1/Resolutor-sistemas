@@ -25,7 +25,7 @@ st.markdown(
         /* Paleta de colores y fuentes */
         .main-header {
             font-size: 2.1rem;
-            color: #0F172A;
+            color: #4A90E2;
             font-weight: 800;
             margin-bottom: 0.1rem;
             letter-spacing: -0.5px;
@@ -211,7 +211,7 @@ with col_vec_b:
     edited_b = st.data_editor(df_b_init, key="editor_b_reticulados", use_container_width=True)
 
 # --- BOTÓN DE RESOLUCIÓN Y EVALUACIÓN ---
-if st.button("🚀 Resolver Equilibrio del Reticulado", type="primary", use_container_width=True):
+if st.button("RESOLVER EQUILIBRIO DEL RETICULADO", type="primary", use_container_width=True):
     try:
         A = edited_A.to_numpy(dtype=float)
         b = edited_b.to_numpy(dtype=float).flatten()
