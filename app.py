@@ -213,7 +213,7 @@ with col_mat_A:
     edited_A = st.data_editor(df_A_init, key="editor_A_reticulados", use_container_width=True)
 
 with col_vec_b:
-    st.subheader("Vector de Cargas Nodeales $[b]$")
+    st.subheader("Vector de Cargas Nodales $[b]$")
     edited_b = st.data_editor(df_b_init, key="editor_b_reticulados", use_container_width=True)
 
 # --- BOTÓN DE RESOLUCIÓN Y EVALUACIÓN ---
