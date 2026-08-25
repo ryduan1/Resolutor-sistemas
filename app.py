@@ -270,7 +270,7 @@ with col_vec_b:
 
 # --- BOTÓN DE RESOLUCIÓN Y EVALUACIÓN ---
 if st.button(
-    "🚀 Resolver Equilibrio del Reticulado",
+    "RESOLVER EQUILIBRIO DEL RETICULADO",
     type="primary",
     use_container_width=True,
 ):
@@ -361,7 +361,7 @@ st.markdown(
         <b>Desarrollado para la Cátedra de Estática y Resistencia de los Materiales (Cód.0318)</b><br>
         Facultad de Ingeniería — Universidad Nacional de Río Cuarto (UNRC)<br><br>
         <b>Autor:</b> Estudiante de Ingeniería Mecánica, Ryduan Maximiliano Arévalo Castellano<br>
-        <b>Contacto Autor:</b> <a href="mailto:ryduare@gmail.com">ryduare@gmail.com</a> &nbsp;•&nbsp; <b>Contacto Cátedra:</b> <a href="mailto:regalum@ing.unrc.edu.ar">regalum@ing.unrc.edu.ar</a>
+        <b>Contacto Autor:</b> <a href="mailto:ryduare@gmail.com">ryduare@gmail.com</a> &nbsp;•&nbsp; <b>Contacto Facultad:</b> <a href="mailto:regalum@ing.unrc.edu.ar">regalum@ing.unrc.edu.ar</a>
     </div>
 """,
     unsafe_allow_html=True,
