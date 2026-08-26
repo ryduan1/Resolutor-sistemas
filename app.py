@@ -3,6 +3,428 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import io
+import re
+import unicodedata
+
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.lines import Line2D
+
+
+# ==============================================================================
+# --- MOTOR DE RIGIDEZ DIRECTA 2D: UTILIDADES DE CARGA CSV Y CÁLCULO ---
+# ==============================================================================
+
+# --- Diccionarios de alias para reconocimiento flexible de columnas ---
+NODE_ALIASES = {
+    "id": ["id", "nodo", "node", "idnodo", "nnodo", "numero", "num", "n"],
+    "x": ["x", "coordx", "cx", "posx", "ejex", "xm", "xcm", "xmm", "xcoord", "coordenadax"],
+    "y": ["y", "coordy", "cy", "posy", "ejey", "ym", "ycm", "ymm", "ycoord", "coordenaday"],
+    "restrx": [
+        "restrx", "rx", "apoyox", "fijox", "restriccionx", "restraintx",
+        "uxrestringido", "fixedx", "empotradox", "apoyoenx",
+    ],
+    "restry": [
+        "restry", "ry", "apoyoy", "fijoy", "restricciony", "restrainty",
+        "uyrestringido", "fixedy", "empotradoy", "apoyoeny",
+    ],
+    "fx": ["fx", "cargax", "fuerzax", "loadx", "px", "cargaenx"],
+    "fy": ["fy", "cargay", "fuerzay", "loady", "py", "cargaeny"],
+}
+
+BAR_ALIASES = {
+    "id": ["id", "barra", "bar", "elemento", "element", "nombre", "name", "idbarra"],
+    "ni": [
+        "ni", "nodoi", "nodo1", "n1", "inicio", "nodoinicial", "nodeinicial",
+        "startnode", "i", "from", "origen", "nodoorigen", "nodoa",
+    ],
+    "nj": [
+        "nj", "nodoj", "nodo2", "n2", "fin", "nodofinal", "nodefinal",
+        "endnode", "j", "to", "destino", "nododestino", "nodob",
+    ],
+    "e": ["e", "emod", "modulo", "moduloelasticidad", "young", "modulodeyoung", "emodulo"],
+    "a": ["a", "area", "areaseccion", "seccion", "areatransversal", "sectionarea"],
+}
+
+
+def _normalizar_texto(s):
+    """Quita acentos, espacios y símbolos; deja minúsculas alfanuméricas puras."""
+    s = str(s).strip()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^a-zA-Z0-9]", "", s)
+    return s.lower()
+
+
+def _mapear_columnas(columnas, aliases):
+    """Devuelve dict {campo_canonico: nombre_columna_original} según coincidencia
+    de alias, y un set de campos no encontrados."""
+    normalizados = {col: _normalizar_texto(col) for col in columnas}
+    mapping = {}
+    for campo, alist in aliases.items():
+        alist_norm = [_normalizar_texto(a) for a in alist]
+        for col, norm in normalizados.items():
+            if norm in alist_norm and campo not in mapping:
+                mapping[campo] = col
+                break
+    return mapping
+
+
+def _factor_unidad_E(nombre_columna):
+    """Detecta unidad de E en el propio encabezado y devuelve el factor a Pascales."""
+    n = str(nombre_columna).lower()
+    if "gpa" in n:
+        return 1e9
+    if "mpa" in n:
+        return 1e6
+    if re.search(r"\bpa\b", n) or n.strip().endswith("[pa]"):
+        return 1.0
+    return 1.0  # sin indicación explícita -> se asume ya en Pa
+
+
+def _factor_unidad_A(nombre_columna):
+    """Detecta unidad de Área en el encabezado y devuelve el factor a m²."""
+    n = str(nombre_columna).lower()
+    if "cm2" in n or "cm²" in n or "cm^2" in n:
+        return 1e-4
+    if "mm2" in n or "mm²" in n or "mm^2" in n:
+        return 1e-6
+    if "m2" in n or "m²" in n or "m^2" in n:
+        return 1.0
+    return 1.0  # sin indicación explícita -> se asume ya en m²
+
+
+def _puntuar_tabla(mapping, campos_clave):
+    """Cuenta cuántos campos clave (esenciales) fueron reconocidos en el mapeo."""
+    return sum(1 for c in campos_clave if c in mapping)
+
+
+def _construir_df_nodos(df_raw, mapping):
+    faltantes = [c for c in ("x", "y") if c not in mapping]
+    if faltantes:
+        return None, f"Faltan columnas obligatorias de Nodos: {faltantes}."
+
+    out = pd.DataFrame()
+    if "id" in mapping:
+        out["id"] = df_raw[mapping["id"]].astype(str)
+    else:
+        out["id"] = [str(i + 1) for i in range(len(df_raw))]
+
+    out["x"] = pd.to_numeric(df_raw[mapping["x"]], errors="coerce")
+    out["y"] = pd.to_numeric(df_raw[mapping["y"]], errors="coerce")
+
+    for campo in ("restrx", "restry", "fx", "fy"):
+        if campo in mapping:
+            col = pd.to_numeric(df_raw[mapping[campo]], errors="coerce").fillna(0)
+        else:
+            col = 0
+        out[campo] = col
+
+    # Restricciones como booleanos 0/1 (aceptando "si/no", "x", etc. ya convertidos a numérico)
+    out["restrx"] = (pd.to_numeric(out["restrx"], errors="coerce").fillna(0) != 0).astype(int)
+    out["restry"] = (pd.to_numeric(out["restry"], errors="coerce").fillna(0) != 0).astype(int)
+
+    if out[["x", "y"]].isnull().any().any():
+        return None, "Hay valores no numéricos en las coordenadas X/Y de Nodos."
+
+    return out, None
+
+
+def _construir_df_barras(df_raw, mapping):
+    faltantes = [c for c in ("ni", "nj") if c not in mapping]
+    if faltantes:
+        return None, f"Faltan columnas obligatorias de Barras: {faltantes}."
+
+    out = pd.DataFrame()
+    if "id" in mapping:
+        out["id"] = df_raw[mapping["id"]].astype(str)
+    else:
+        out["id"] = [f"B{i + 1}" for i in range(len(df_raw))]
+
+    out["ni"] = df_raw[mapping["ni"]].astype(str)
+    out["nj"] = df_raw[mapping["nj"]].astype(str)
+
+    if "e" in mapping:
+        factor_e = _factor_unidad_E(mapping["e"])
+        out["e"] = pd.to_numeric(df_raw[mapping["e"]], errors="coerce") * factor_e
+    else:
+        out["e"] = 200e9  # valor por defecto: acero estructural aprox. [Pa]
+
+    if "a" in mapping:
+        factor_a = _factor_unidad_A(mapping["a"])
+        out["a"] = pd.to_numeric(df_raw[mapping["a"]], errors="coerce") * factor_a
+    else:
+        out["a"] = 0.0005  # valor por defecto [m²]
+
+    if out[["e", "a"]].isnull().any().any():
+        return None, "Hay valores no numéricos en E o A de Barras."
+
+    return out, None
+
+
+def clasificar_y_dividir_csv(uploaded_file):
+    """
+    Lee un archivo CSV subido por el usuario y devuelve (nodes_df, bars_df, mensajes).
+    - Reconoce automáticamente las columnas aunque cambie el orden o el nombre exacto.
+    - Si el archivo trae dos tablas separadas por una fila en blanco, las separa.
+    - Si trae una sola tabla, la clasifica como Nodos o Barras según qué columnas detecta.
+    """
+    mensajes = []
+    try:
+        contenido = uploaded_file.getvalue().decode("utf-8-sig")
+    except Exception:
+        uploaded_file.seek(0)
+        contenido = uploaded_file.read()
+        if isinstance(contenido, bytes):
+            contenido = contenido.decode("latin-1")
+
+    # Separador: coma o punto y coma
+    sep = ";" if contenido.count(";") > contenido.count(",") else ","
+
+    # Buscar bloques separados por líneas en blanco (soporta un único CSV con ambas tablas)
+    bloques = [b for b in re.split(r"\n\s*\n", contenido.strip()) if b.strip()]
+
+    nodes_df, bars_df = None, None
+
+    for bloque in bloques:
+        try:
+            df_raw = pd.read_csv(io.StringIO(bloque), sep=sep)
+        except Exception:
+            mensajes.append("⚠️ No se pudo interpretar uno de los bloques del CSV.")
+            continue
+
+        if df_raw.empty or len(df_raw.columns) == 0:
+            continue
+
+        mapping_nodos = _mapear_columnas(df_raw.columns, NODE_ALIASES)
+        mapping_barras = _mapear_columnas(df_raw.columns, BAR_ALIASES)
+
+        score_nodos = _puntuar_tabla(mapping_nodos, ("x", "y"))
+        score_barras = _puntuar_tabla(mapping_barras, ("ni", "nj"))
+
+        if score_nodos >= 2 and score_nodos >= score_barras:
+            df_nodos, err = _construir_df_nodos(df_raw, mapping_nodos)
+            if err:
+                mensajes.append(f"⚠️ Bloque reconocido como Nodos, pero: {err}")
+            else:
+                nodes_df = df_nodos
+                mensajes.append(f"✅ Se detectó una tabla de **Nodos** ({len(df_nodos)} filas).")
+        elif score_barras >= 2 and score_barras > score_nodos:
+            df_barras, err = _construir_df_barras(df_raw, mapping_barras)
+            if err:
+                mensajes.append(f"⚠️ Bloque reconocido como Barras, pero: {err}")
+            else:
+                bars_df = df_barras
+                mensajes.append(f"✅ Se detectó una tabla de **Barras** ({len(df_barras)} filas).")
+        else:
+            mensajes.append(
+                "⚠️ No se pudo determinar si un bloque del CSV corresponde a Nodos o Barras. "
+                "Verificá los nombres de columnas."
+            )
+
+    return nodes_df, bars_df, mensajes
+
+
+def resolver_rigidez_directa(nodes_df, bars_df):
+    """
+    Ensambla la matriz de rigidez global 2D, resuelve desplazamientos, reacciones
+    y fuerzas/tensiones internas de cada barra mediante el Método de Rigidez Directa.
+    """
+    node_ids = list(nodes_df["id"])
+    id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
+    n = len(node_ids)
+    ndof = 2 * n
+
+    xs = nodes_df["x"].to_numpy(dtype=float)
+    ys = nodes_df["y"].to_numpy(dtype=float)
+
+    K = np.zeros((ndof, ndof))
+    F = np.zeros(ndof)
+
+    for _, row in nodes_df.iterrows():
+        idx = id_to_idx[row["id"]]
+        F[2 * idx] = row["fx"]
+        F[2 * idx + 1] = row["fy"]
+
+    bar_info = []
+    for _, row in bars_df.iterrows():
+        ni, nj = row["ni"], row["nj"]
+        if ni not in id_to_idx or nj not in id_to_idx:
+            raise ValueError(
+                f"La barra '{row['id']}' referencia un nodo inexistente ({ni} o {nj})."
+            )
+        i, j = id_to_idx[ni], id_to_idx[nj]
+        xi, yi = xs[i], ys[i]
+        xj, yj = xs[j], ys[j]
+        L = float(np.hypot(xj - xi, yj - yi))
+        if L <= 1e-12:
+            raise ValueError(f"La barra '{row['id']}' tiene longitud nula (nodos coincidentes).")
+
+        c = (xj - xi) / L
+        s = (yj - yi) / L
+        E = float(row["e"])
+        A = float(row["a"])
+        k_ax = (E * A) / L
+
+        ke = k_ax * np.array([
+            [c * c, c * s, -c * c, -c * s],
+            [c * s, s * s, -c * s, -s * s],
+            [-c * c, -c * s, c * c, c * s],
+            [-c * s, -s * s, c * s, s * s],
+        ])
+        dofs = [2 * i, 2 * i + 1, 2 * j, 2 * j + 1]
+        for a_ in range(4):
+            for b_ in range(4):
+                K[dofs[a_], dofs[b_]] += ke[a_, b_]
+
+        bar_info.append({
+            "id": row["id"], "i": i, "j": j, "L": L, "c": c, "s": s, "E": E, "A": A,
+        })
+
+    restringidos = []
+    for _, row in nodes_df.iterrows():
+        idx = id_to_idx[row["id"]]
+        if int(row["restrx"]) == 1:
+            restringidos.append(2 * idx)
+        if int(row["restry"]) == 1:
+            restringidos.append(2 * idx + 1)
+
+    libres = [d for d in range(ndof) if d not in restringidos]
+
+    if len(libres) == 0:
+        raise ValueError("Todos los grados de libertad están restringidos: no hay nada que resolver.")
+
+    K_ff = K[np.ix_(libres, libres)]
+    F_f = F[libres]
+
+    if np.linalg.matrix_rank(K_ff) < len(libres):
+        raise ValueError(
+            "La matriz de rigidez reducida es singular. La estructura es un mecanismo "
+            "(hipostática) o está mal vinculada/conectada. Verificá apoyos y barras."
+        )
+
+    u_f = np.linalg.solve(K_ff, F_f)
+    u = np.zeros(ndof)
+    for pos, dof in enumerate(libres):
+        u[dof] = u_f[pos]
+
+    R = K @ u - F  # reacciones en grados restringidos; ~0 en los libres
+
+    resultados_barras = []
+    for bi in bar_info:
+        i, j = bi["i"], bi["j"]
+        uix, uiy = u[2 * i], u[2 * i + 1]
+        ujx, ujy = u[2 * j], u[2 * j + 1]
+        c, s = bi["c"], bi["s"]
+        elongacion = c * (ujx - uix) + s * (ujy - uiy)
+        N = (bi["E"] * bi["A"] / bi["L"]) * elongacion
+        sigma = N / bi["A"]
+        resultados_barras.append({
+            "id": bi["id"], "i": i, "j": j, "N": N, "sigma": sigma, "L": bi["L"],
+        })
+
+    return {
+        "u": u, "R": R, "resultados_barras": resultados_barras,
+        "node_ids": node_ids, "id_to_idx": id_to_idx, "xs": xs, "ys": ys,
+        "restringidos": restringidos,
+    }
+
+
+def graficar_reticulado_rigidez(nodes_df, bars_df, resultado, escala):
+    """Genera la figura Matplotlib: geometría original (punteada) vs. deformada
+    (coloreada según |tensión|, trazo continuo=Tracción / discontinuo=Compresión)."""
+    xs, ys = resultado["xs"], resultado["ys"]
+    u = resultado["u"]
+    id_to_idx = resultado["id_to_idx"]
+    resultados_barras = resultado["resultados_barras"]
+    restringidos = resultado["restringidos"]
+
+    fig, ax = plt.subplots(figsize=(9.5, 7.5))
+
+    # --- Estructura original (punteada, gris) ---
+    for _, row in bars_df.iterrows():
+        i, j = id_to_idx[row["ni"]], id_to_idx[row["nj"]]
+        ax.plot(
+            [xs[i], xs[j]], [ys[i], ys[j]],
+            linestyle=(0, (2, 2)), color="#94A3B8", linewidth=1.4, zorder=1,
+        )
+    ax.scatter(xs, ys, c="#CBD5E1", s=45, zorder=2, edgecolor="#94A3B8", linewidth=0.8)
+
+    # --- Escala de colores según |tensión| ---
+    tensiones_abs = [abs(r["sigma"]) for r in resultados_barras]
+    vmax = max(tensiones_abs) if tensiones_abs and max(tensiones_abs) > 0 else 1.0
+    cmap = plt.get_cmap("RdYlBu_r")
+    norm = mcolors.Normalize(vmin=0.0, vmax=vmax)
+
+    xs_def = xs + escala * u[0::2]
+    ys_def = ys + escala * u[1::2]
+
+    for r in resultados_barras:
+        i, j = r["i"], r["j"]
+        xi_d, yi_d = xs_def[i], ys_def[i]
+        xj_d, yj_d = xs_def[j], ys_def[j]
+        color = cmap(norm(abs(r["sigma"])))
+        es_traccion = r["N"] >= 0
+        linestyle = "-" if es_traccion else "--"
+        ax.plot(
+            [xi_d, xj_d], [yi_d, yj_d],
+            linestyle=linestyle, color=color, linewidth=3.2, zorder=3,
+            solid_capstyle="round",
+        )
+        midx, midy = (xi_d + xj_d) / 2, (yi_d + yj_d) / 2
+        estado = "T" if r["N"] > 1e-6 else ("C" if r["N"] < -1e-6 else "N")
+        ax.annotate(
+            f"{r['id']} ({estado})", (midx, midy),
+            fontsize=7.5, color="#1E293B", ha="center", va="center",
+            bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.8),
+            zorder=5,
+        )
+
+    # --- Nodos deformados + apoyos ---
+    ax.scatter(xs_def, ys_def, c="#0F172A", s=40, zorder=4)
+    for nid, idx in id_to_idx.items():
+        ax.annotate(
+            str(nid), (xs_def[idx], ys_def[idx]),
+            textcoords="offset points", xytext=(7, 7),
+            fontsize=8.5, fontweight="bold", color="#0F172A", zorder=6,
+        )
+        dof_x, dof_y = 2 * idx, 2 * idx + 1
+        if dof_x in restringidos or dof_y in restringidos:
+            ax.scatter(
+                [xs[idx]], [ys[idx]], marker="^", s=160,
+                facecolor="#F59E0B", edgecolor="#78350F", linewidth=1.2, zorder=2.5,
+            )
+
+    # --- Colorbar ---
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.82, pad=0.02)
+    cbar.set_label("Nivel de solicitación |σ| = |N| / A  [Pa]", fontsize=9)
+
+    # --- Leyenda explicativa ---
+    leyenda = [
+        Line2D([0], [0], linestyle=(0, (2, 2)), color="#94A3B8", lw=1.4, label="Geometría original"),
+        Line2D([0], [0], linestyle="-", color="#334155", lw=3, label="Barra en Tracción (T)"),
+        Line2D([0], [0], linestyle="--", color="#334155", lw=3, label="Barra en Compresión (C)"),
+        Line2D(
+            [0], [0], marker="^", color="w", markerfacecolor="#F59E0B",
+            markeredgecolor="#78350F", markersize=11, label="Apoyo / Restricción",
+        ),
+    ]
+    ax.legend(handles=leyenda, loc="best", fontsize=8, framealpha=0.9)
+
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.set_title(
+        f"Reticulado: Original (punteado) vs. Deformada — Factor de escala ×{escala:.2f}",
+        fontsize=11, fontweight="bold",
+    )
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    return fig
+
+
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
     page_title="Solver de Reticulados | Facultad de Ingeniería UNRC",
@@ -208,6 +630,82 @@ else:
             f"🔵 **b + r > 2N** (Hiperestático)\nPosee {grado_libertad} elemento(s) redundante(s)."
         )
 
+st.sidebar.divider()
+st.sidebar.header("📥 Carga por CSV (Rigidez Directa)")
+st.sidebar.caption(
+    "Estos archivos alimentan la pestaña **🏗️ Rigidez Directa (Geometría 2D)**. "
+    "No afectan al Método de los Nodos (manual)."
+)
+
+with st.sidebar.expander("ℹ️ Formato de columnas reconocido"):
+    st.markdown(
+        """
+        **Nodos** (obligatorias: `X`, `Y`):
+        `ID / Nodo`, `X`, `Y`, `RestrX / ApoyoX`, `RestrY / ApoyoY`,
+        `Fx / CargaX`, `Fy / CargaY`
+
+        **Barras** (obligatorias: `Nodo i`, `Nodo j`):
+        `ID / Barra`, `Ni / NodoI / N1`, `Nj / NodoJ / N2`,
+        `E [GPa|MPa|Pa]`, `A [cm2|mm2|m2]`
+
+        El sistema reconoce automáticamente variantes de nombres y orden de columnas.
+        Un mismo CSV puede traer ambas tablas separadas por una fila en blanco,
+        o se pueden subir dos archivos independientes.
+        """
+    )
+
+csv_nodos_file = st.sidebar.file_uploader(
+    "CSV de Nodos (o combinado Nodos+Barras)", type=["csv"], key="csv_nodos_uploader"
+)
+csv_barras_file = st.sidebar.file_uploader(
+    "CSV de Barras (opcional si ya fue incluido arriba)", type=["csv"], key="csv_barras_uploader"
+)
+
+if "rigidez_nodes_df" not in st.session_state:
+    st.session_state["rigidez_nodes_df"] = None
+if "rigidez_bars_df" not in st.session_state:
+    st.session_state["rigidez_bars_df"] = None
+if "rigidez_csv_version" not in st.session_state:
+    st.session_state["rigidez_csv_version"] = 0
+
+_csv_mensajes = []
+_huellas_previas = (
+    st.session_state.get("_csv_nodos_sig"),
+    st.session_state.get("_csv_barras_sig"),
+)
+_huella_nodos = csv_nodos_file.file_id if csv_nodos_file is not None else None
+_huella_barras = csv_barras_file.file_id if csv_barras_file is not None else None
+
+if (_huella_nodos, _huella_barras) != _huellas_previas and (
+    csv_nodos_file is not None or csv_barras_file is not None
+):
+    for _csv_file in (csv_nodos_file, csv_barras_file):
+        if _csv_file is not None:
+            _n_df, _b_df, _msgs = clasificar_y_dividir_csv(_csv_file)
+            _csv_mensajes.extend(_msgs)
+            if _n_df is not None:
+                st.session_state["rigidez_nodes_df"] = _n_df
+            if _b_df is not None:
+                st.session_state["rigidez_bars_df"] = _b_df
+    st.session_state["_csv_nodos_sig"] = _huella_nodos
+    st.session_state["_csv_barras_sig"] = _huella_barras
+    st.session_state["rigidez_csv_version"] += 1
+
+if _csv_mensajes:
+    with st.sidebar.expander("📋 Resultado de la lectura del CSV", expanded=True):
+        for _m in _csv_mensajes:
+            st.write(_m)
+
+if st.session_state["rigidez_nodes_df"] is not None or st.session_state["rigidez_bars_df"] is not None:
+    if st.sidebar.button("🗑️ Limpiar datos cargados por CSV"):
+        st.session_state["rigidez_nodes_df"] = None
+        st.session_state["rigidez_bars_df"] = None
+        st.session_state["_csv_nodos_sig"] = None
+        st.session_state["_csv_barras_sig"] = None
+        st.session_state["rigidez_csv_version"] += 1
+        st.rerun()
+
+
 columnas_x = barras + reacciones
 num_incognitas = len(columnas_x)
 
@@ -218,141 +716,379 @@ for i in range(1, num_nodos + 1):
 
 num_ecuaciones = len(filas_eq)
 
-st.write("### 📝 Sistema de Ecuaciones de Equilibrio Nodal")
-st.write(
-    f"**Ecuaciones planteadas:** {num_ecuaciones} ({num_nodos} nodos × 2 ejes) | **Incógnitas:** {num_incognitas} ({b_count} barras + {r_count} reacciones)"
-)
 
-# Matriz e Inicialización
-if cargar_ejemplo and num_nodos == 6 and num_incognitas == 12:
-    default_A_data = [
-        [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.7071, 0.0, 0.0, 1.0, 0.0, 0.0],
-        [-1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.7071, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-        [0.0, 0.0, 0.0, 1.0, -1.0, 0.0, -0.7071, 0.0, 0.7071, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.7071, -1.0, -0.7071, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    ]
-    default_b_data = [0, 0, 0, 16, 0, 0, 0, 0, 0, 0, -12, 0]
-    df_A_init = pd.DataFrame(default_A_data, index=filas_eq, columns=columnas_x)
-    df_b_init = pd.DataFrame(
-        default_b_data, index=filas_eq, columns=["Cargas Ext. (b)"]
-    )
-else:
-    df_A_init = pd.DataFrame(
-        np.zeros((num_ecuaciones, num_incognitas)),
-        index=filas_eq,
-        columns=columnas_x,
-    )
-    df_b_init = pd.DataFrame(
-        np.zeros((num_ecuaciones, 1)), index=filas_eq, columns=["Cargas Ext. (b)"]
+st.divider()
+tab1, tab2 = st.tabs([
+    "📐 Método de los Nodos (Manual)",
+    "🏗️ Rigidez Directa (Geometría 2D + CSV)",
+])
+
+with tab1:
+    st.write("### 📝 Sistema de Ecuaciones de Equilibrio Nodal")
+    st.write(
+        f"**Ecuaciones planteadas:** {num_ecuaciones} ({num_nodos} nodos × 2 ejes) | **Incógnitas:** {num_incognitas} ({b_count} barras + {r_count} reacciones)"
     )
 
-col_mat_A, col_vec_b = st.columns([3.5, 1.2])
+    # Matriz e Inicialización
+    if cargar_ejemplo and num_nodos == 6 and num_incognitas == 12:
+        default_A_data = [
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.7071, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [-1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.7071, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0, -1.0, 0.0, -0.7071, 0.0, 0.7071, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.7071, -1.0, -0.7071, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ]
+        default_b_data = [0, 0, 0, 16, 0, 0, 0, 0, 0, 0, -12, 0]
+        df_A_init = pd.DataFrame(default_A_data, index=filas_eq, columns=columnas_x)
+        df_b_init = pd.DataFrame(
+            default_b_data, index=filas_eq, columns=["Cargas Ext. (b)"]
+        )
+    else:
+        df_A_init = pd.DataFrame(
+            np.zeros((num_ecuaciones, num_incognitas)),
+            index=filas_eq,
+            columns=columnas_x,
+        )
+        df_b_init = pd.DataFrame(
+            np.zeros((num_ecuaciones, 1)), index=filas_eq, columns=["Cargas Ext. (b)"]
+        )
 
-with col_mat_A:
-    st.subheader("Matriz de Coeficientes $[A]$")
-    edited_A = st.data_editor(
-        df_A_init, key="editor_A_reticulados", use_container_width=True
+    col_mat_A, col_vec_b = st.columns([3.5, 1.2])
+
+    with col_mat_A:
+        st.subheader("Matriz de Coeficientes $[A]$")
+        edited_A = st.data_editor(
+            df_A_init, key="editor_A_reticulados", use_container_width=True
+        )
+
+    with col_vec_b:
+        st.subheader("Vector de Cargas Nodales $[b]$")
+        edited_b = st.data_editor(
+            df_b_init, key="editor_b_reticulados", use_container_width=True
+        )
+
+    # --- BOTÓN DE RESOLUCIÓN Y EVALUACIÓN ---
+    if st.button(
+        "RESOLVER EQUILIBRIO DEL RETICULADO",
+        type="primary",
+        use_container_width=True,
+    ):
+        try:
+            A = edited_A.to_numpy(dtype=float)
+            b = edited_b.to_numpy(dtype=float).flatten()
+
+            rank_A = int(np.linalg.matrix_rank(A))
+            n_unknowns = A.shape[1]
+            b_reshaped = b.reshape(-1, 1)
+            augmented_matrix = np.hstack((A, b_reshaped))
+            rank_Ab = int(np.linalg.matrix_rank(augmented_matrix))
+
+            st.divider()
+            st.write("### 📊 Diagnóstico y Resultados de Análisis Estructural")
+
+            c_rA, c_rAb, c_n = st.columns(3)
+            c_rA.metric("Rango de [A]", rank_A)
+            c_rAb.metric("Rango de [A:b]", rank_Ab)
+            c_n.metric("Nº Incógnitas (n)", n_unknowns)
+
+            st.subheader("Estado de Equilibrio de la Estructura")
+
+            if rank_A == rank_Ab:
+                if rank_A == n_unknowns:
+                    st.success(
+                        "✅ **LOGRA EL EQUILIBRIO — Solución Única (Sistema Isostático)**"
+                    )
+                    st.write(
+                        "El reticulado es **isostático y estable**. Existe una única combinación de fuerzas internas y reacciones capaz de equilibrar la estructura."
+                    )
+
+                    x = np.linalg.solve(A, b)
+
+                    res_df = pd.DataFrame({
+                        "Incógnita / Componente": columnas_x,
+                        "Tipo de Elemento": [
+                            "Fuerza en Barra" if col in barras else "Reacción de Apoyo"
+                            for col in columnas_x
+                        ],
+                        "Valor Calculado": [f"{val:.4f}" for val in x],
+                        "Estado / Solicitación": [
+                            "Tracción (+)"
+                            if val > 0.0001
+                            else ("Compresión (-)" if val < -0.0001 else "Barra Nula / Neutra")
+                            for val in x
+                        ],
+                    })
+
+                    st.write("#### 🎯 Solución del Vector Incógnita $x$:")
+                    st.table(res_df)
+
+                else:
+                    st.warning(
+                        "⚠️ **LOGRA EL EQUILIBRIO — Infinitas Soluciones (Sistema Hiperestático)**"
+                    )
+                    st.write(
+                        "La estructura es **hiperestática**. Cuenta con elementos redundantes y requiere ecuaciones de compatibilidad de deformaciones para una solución única."
+                    )
+
+                    x = np.linalg.lstsq(A, b, rcond=None)[0]
+
+                    res_df = pd.DataFrame({
+                        "Incógnita / Componente": columnas_x,
+                        "Tipo de Elemento": [
+                            "Fuerza en Barra" if col in barras else "Reacción de Apoyo"
+                            for col in columnas_x
+                        ],
+                        "Solución Particular (Mín. Cuadrados)": [f"{val:.4f}" for val in x],
+                    })
+                    st.write("#### 🎯 Solución Particular Calculada:")
+                    st.table(res_df)
+            else:
+                st.error(
+                    "❌ **NO LOGRA EL EQUILIBRIO — Sin Solución (Sistema Incompatible / Hipostático)**"
+                )
+                st.write(
+                    "La estructura constituye un **mecanismo inestable**. Las cargas aplicadas no pueden ser soportadas por la disposición actual de barras y apoyos."
+                )
+
+        except Exception as e:
+            st.error(f"Error en el procesamiento de datos: {str(e)}")
+
+
+with tab2:
+    st.write("### 🏗️ Análisis por Método de Rigidez Directa (Elementos Barra 2D)")
+    st.write(
+        "Definí la geometría del reticulado (coordenadas de nodos, conectividad de "
+        "barras, apoyos y cargas) manualmente en las tablas o cargando un CSV desde "
+        "la barra lateral. El sistema ensambla la matriz de rigidez global, resuelve "
+        "los desplazamientos nodales y calcula fuerzas internas, tensiones y reacciones."
     )
 
-with col_vec_b:
-    st.subheader("Vector de Cargas Nodales $[b]$")
-    edited_b = st.data_editor(
-        df_b_init, key="editor_b_reticulados", use_container_width=True
-    )
+    with st.expander("📖 **Fundamento: Ensamblaje y Solución por Rigidez Directa**"):
+        st.markdown(r"""
+        Para cada barra $ij$ con longitud $L$, módulo de elasticidad $E$, área $A$ y
+        cosenos directores $c = \cos\theta$, $s = \sin\theta$, la matriz de rigidez
+        local en coordenadas globales es:
 
-# --- BOTÓN DE RESOLUCIÓN Y EVALUACIÓN ---
-if st.button(
-    "RESOLVER EQUILIBRIO DEL RETICULADO",
-    type="primary",
-    use_container_width=True,
-):
-    try:
-        A = edited_A.to_numpy(dtype=float)
-        b = edited_b.to_numpy(dtype=float).flatten()
+        $$
+        [k_e] = \frac{EA}{L}
+        \begin{bmatrix}
+        c^2 & cs & -c^2 & -cs \\
+        cs & s^2 & -cs & -s^2 \\
+        -c^2 & -cs & c^2 & cs \\
+        -cs & -s^2 & cs & s^2
+        \end{bmatrix}
+        $$
 
-        rank_A = int(np.linalg.matrix_rank(A))
-        n_unknowns = A.shape[1]
-        b_reshaped = b.reshape(-1, 1)
-        augmented_matrix = np.hstack((A, b_reshaped))
-        rank_Ab = int(np.linalg.matrix_rank(augmented_matrix))
+        Ensamblando todas las barras se obtiene $[K]$ global. Particionando por grados
+        de libertad libres ($f$) y restringidos ($r$):
+
+        $$
+        [K_{ff}]\{u_f\} = \{F_f\} \quad\Rightarrow\quad \{u_f\} = [K_{ff}]^{-1}\{F_f\}
+        $$
+
+        Las reacciones surgen de $\{R\} = [K]\{u\} - \{F\}$, y la fuerza axial de cada
+        barra de $N = \frac{EA}{L}\big(c(u_{jx}-u_{ix}) + s(u_{jy}-u_{iy})\big)$,
+        con tensión $\sigma = N / A$.
+        """)
+
+    version = st.session_state.get("rigidez_csv_version", 0)
+
+    def _ejemplo_nodos():
+        return pd.DataFrame({
+            "id": ["1", "2", "3"],
+            "x": [0.0, 4.0, 2.0],
+            "y": [0.0, 0.0, 3.0],
+            "restrx": [1, 0, 0],
+            "restry": [1, 1, 0],
+            "fx": [0.0, 0.0, 0.0],
+            "fy": [0.0, 0.0, -10000.0],
+        })
+
+    def _ejemplo_barras():
+        return pd.DataFrame({
+            "id": ["B1", "B2", "B3"],
+            "ni": ["1", "2", "3"],
+            "nj": ["2", "3", "1"],
+            "e": [200e9, 200e9, 200e9],
+            "a": [0.0005, 0.0005, 0.0005],
+        })
+
+    nodes_base = st.session_state.get("rigidez_nodes_df")
+    bars_base = st.session_state.get("rigidez_bars_df")
+    origen_datos = "CSV cargado" if (nodes_base is not None or bars_base is not None) else "Ejemplo por defecto"
+    if nodes_base is None:
+        nodes_base = _ejemplo_nodos()
+    if bars_base is None:
+        bars_base = _ejemplo_barras()
+
+    st.caption(f"📌 Origen de los datos actuales en las tablas: **{origen_datos}**")
+
+    col_nodos_editor, col_barras_editor = st.columns([1.15, 1])
+
+    with col_nodos_editor:
+        st.subheader("Tabla de Nodos")
+        st.caption("`restrx`/`restry` = 1 si el desplazamiento está restringido en ese eje (apoyo).")
+        nodes_df = st.data_editor(
+            nodes_base,
+            key=f"editor_nodes_rigidez_{version}",
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "id": st.column_config.TextColumn("ID Nodo"),
+                "x": st.column_config.NumberColumn("X", format="%.4f"),
+                "y": st.column_config.NumberColumn("Y", format="%.4f"),
+                "restrx": st.column_config.NumberColumn("RestrX (0/1)", min_value=0, max_value=1, step=1),
+                "restry": st.column_config.NumberColumn("RestrY (0/1)", min_value=0, max_value=1, step=1),
+                "fx": st.column_config.NumberColumn("Fx [N]", format="%.2f"),
+                "fy": st.column_config.NumberColumn("Fy [N]", format="%.2f"),
+            },
+        )
+
+    with col_barras_editor:
+        st.subheader("Tabla de Barras")
+        st.caption("`e` en Pa y `a` en m² (o cargá un CSV con unidades en el encabezado).")
+        bars_df = st.data_editor(
+            bars_base,
+            key=f"editor_bars_rigidez_{version}",
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "id": st.column_config.TextColumn("ID Barra"),
+                "ni": st.column_config.TextColumn("Nodo i"),
+                "nj": st.column_config.TextColumn("Nodo j"),
+                "e": st.column_config.NumberColumn("E [Pa]", format="%.3e"),
+                "a": st.column_config.NumberColumn("A [m²]", format="%.6f"),
+            },
+        )
+
+    escala_sugerida = 1.0
+    resultado_calc = st.session_state.get("rigidez_ultimo_resultado")
+
+    col_escala, col_boton = st.columns([1, 1.4])
+    with col_escala:
+        if resultado_calc is not None:
+            max_disp = float(np.max(np.abs(resultado_calc["u"]))) if len(resultado_calc["u"]) else 0.0
+            xs_r, ys_r = resultado_calc["xs"], resultado_calc["ys"]
+            diag = float(np.hypot(xs_r.max() - xs_r.min(), ys_r.max() - ys_r.min())) if len(xs_r) else 1.0
+            if max_disp > 1e-12 and diag > 0:
+                escala_sugerida = round(0.12 * diag / max_disp, 2)
+            else:
+                escala_sugerida = 1.0
+        escala = st.number_input(
+            "Factor de escala de la deformada",
+            min_value=0.0,
+            value=float(escala_sugerida),
+            step=float(max(escala_sugerida, 1.0)) / 10 or 0.1,
+            help="Multiplica los desplazamientos calculados para poder visualizarlos "
+                 "(suelen ser muy pequeños frente a la geometría). Se sugiere un valor "
+                 "automático tras resolver.",
+        )
+
+    with col_boton:
+        st.write("")
+        resolver_click = st.button(
+            "RESOLVER POR RIGIDEZ DIRECTA", type="primary", use_container_width=True,
+            key="btn_resolver_rigidez",
+        )
+
+    if resolver_click:
+        try:
+            nodes_calc = nodes_df.copy()
+            bars_calc = bars_df.copy()
+            nodes_calc["id"] = nodes_calc["id"].astype(str)
+            bars_calc["ni"] = bars_calc["ni"].astype(str)
+            bars_calc["nj"] = bars_calc["nj"].astype(str)
+
+            for col in ("x", "y", "restrx", "restry", "fx", "fy"):
+                nodes_calc[col] = pd.to_numeric(nodes_calc[col], errors="coerce")
+            for col in ("e", "a"):
+                bars_calc[col] = pd.to_numeric(bars_calc[col], errors="coerce")
+
+            if nodes_calc[["x", "y"]].isnull().any().any():
+                st.error("Hay coordenadas X/Y no numéricas o vacías en la tabla de Nodos.")
+            elif bars_calc[["e", "a"]].isnull().any().any():
+                st.error("Hay valores E/A no numéricos o vacíos en la tabla de Barras.")
+            else:
+                resultado_calc = resolver_rigidez_directa(nodes_calc, bars_calc)
+                st.session_state["rigidez_ultimo_resultado"] = resultado_calc
+                st.session_state["rigidez_ultimos_nodes_df"] = nodes_calc
+                st.session_state["rigidez_ultimos_bars_df"] = bars_calc
+                st.success("✅ Sistema resuelto correctamente por Rigidez Directa.")
+        except ValueError as e:
+            st.error(f"❌ {str(e)}")
+            resultado_calc = None
+        except Exception as e:
+            st.error(f"Error en el procesamiento de datos: {str(e)}")
+            resultado_calc = None
+
+    if resultado_calc is not None:
+        nodes_calc = st.session_state.get("rigidez_ultimos_nodes_df", nodes_df)
+        bars_calc = st.session_state.get("rigidez_ultimos_bars_df", bars_df)
 
         st.divider()
-        st.write("### 📊 Diagnóstico y Resultados de Análisis Estructural")
+        st.write("### 📊 Resultados del Análisis")
 
-        c_rA, c_rAb, c_n = st.columns(3)
-        c_rA.metric("Rango de [A]", rank_A)
-        c_rAb.metric("Rango de [A:b]", rank_Ab)
-        c_n.metric("Nº Incógnitas (n)", n_unknowns)
+        u = resultado_calc["u"]
+        R = resultado_calc["R"]
+        id_to_idx = resultado_calc["id_to_idx"]
+        restringidos = resultado_calc["restringidos"]
 
-        st.subheader("Estado de Equilibrio de la Estructura")
+        col_res1, col_res2 = st.columns(2)
 
-        if rank_A == rank_Ab:
-            if rank_A == n_unknowns:
-                st.success(
-                    "✅ **LOGRA EL EQUILIBRIO — Solución Única (Sistema Isostático)**"
-                )
-                st.write(
-                    "El reticulado es **isostático y estable**. Existe una única combinación de fuerzas internas y reacciones capaz de equilibrar la estructura."
-                )
+        with col_res1:
+            st.write("#### Desplazamientos Nodales")
+            disp_df = pd.DataFrame({
+                "Nodo": resultado_calc["node_ids"],
+                "ux [m]": [u[2 * id_to_idx[nid]] for nid in resultado_calc["node_ids"]],
+                "uy [m]": [u[2 * id_to_idx[nid] + 1] for nid in resultado_calc["node_ids"]],
+            })
+            st.dataframe(disp_df, use_container_width=True, hide_index=True)
 
-                x = np.linalg.solve(A, b)
-
-                res_df = pd.DataFrame({
-                    "Incógnita / Componente": columnas_x,
-                    "Tipo de Elemento": [
-                        "Fuerza en Barra" if col in barras else "Reacción de Apoyo"
-                        for col in columnas_x
-                    ],
-                    "Valor Calculado": [f"{val:.4f}" for val in x],
-                    "Estado / Solicitación": [
-                        "Tracción (+)"
-                        if val > 0.0001
-                        else ("Compresión (-)" if val < -0.0001 else "Barra Nula / Neutra")
-                        for val in x
-                    ],
-                })
-
-                st.write("#### 🎯 Solución del Vector Incógnita $x$:")
-                st.table(res_df)
-
+            st.write("#### Reacciones de Apoyo")
+            filas_reacc = []
+            for nid in resultado_calc["node_ids"]:
+                idx = id_to_idx[nid]
+                if 2 * idx in restringidos:
+                    filas_reacc.append({"Nodo": nid, "Componente": "Rx [N]", "Valor": R[2 * idx]})
+                if 2 * idx + 1 in restringidos:
+                    filas_reacc.append({"Nodo": nid, "Componente": "Ry [N]", "Valor": R[2 * idx + 1]})
+            if filas_reacc:
+                st.dataframe(pd.DataFrame(filas_reacc), use_container_width=True, hide_index=True)
             else:
-                st.warning(
-                    "⚠️ **LOGRA EL EQUILIBRIO — Infinitas Soluciones (Sistema Hiperestático)**"
-                )
-                st.write(
-                    "La estructura es **hiperestática**. Cuenta con elementos redundantes y requiere ecuaciones de compatibilidad de deformaciones para una solución única."
-                )
+                st.info("No hay grados de libertad restringidos.")
 
-                x = np.linalg.lstsq(A, b, rcond=None)[0]
-
-                res_df = pd.DataFrame({
-                    "Incógnita / Componente": columnas_x,
-                    "Tipo de Elemento": [
-                        "Fuerza en Barra" if col in barras else "Reacción de Apoyo"
-                        for col in columnas_x
-                    ],
-                    "Solución Particular (Mín. Cuadrados)": [f"{val:.4f}" for val in x],
+        with col_res2:
+            st.write("#### Fuerzas Internas y Tensiones en Barras")
+            filas_barras = []
+            for r in resultado_calc["resultados_barras"]:
+                estado = "Tracción (+)" if r["N"] > 1e-6 else (
+                    "Compresión (−)" if r["N"] < -1e-6 else "Nula / Neutra"
+                )
+                filas_barras.append({
+                    "Barra": r["id"],
+                    "N [N]": f"{r['N']:.2f}",
+                    "σ = N/A [Pa]": f"{r['sigma']:.2f}",
+                    "Estado": estado,
                 })
-                st.write("#### 🎯 Solución Particular Calculada:")
-                st.table(res_df)
-        else:
-            st.error(
-                "❌ **NO LOGRA EL EQUILIBRIO — Sin Solución (Sistema Incompatible / Hipostático)**"
-            )
-            st.write(
-                "La estructura constituye un **mecanismo inestable**. Las cargas aplicadas no pueden ser soportadas por la disposición actual de barras y apoyos."
-            )
+            st.dataframe(pd.DataFrame(filas_barras), use_container_width=True, hide_index=True)
 
-    except Exception as e:
-        st.error(f"Error en el procesamiento de datos: {str(e)}")
+        st.divider()
+        st.write("### 📈 Geometría: Original vs. Deformada")
+        fig = graficar_reticulado_rigidez(nodes_calc, bars_calc, resultado_calc, escala)
+        st.pyplot(fig)
+        st.caption(
+            "Líneas punteadas grises: geometría original. Líneas de color: geometría "
+            "deformada (escalada). Trazo continuo = Tracción, trazo discontinuo = "
+            "Compresión. El color va de azul (baja solicitación) a rojo (alta "
+            "solicitación), según la barra de colores."
+        )
 
 # --- PIE DE PÁGINA INSTITUCIONAL Y AUTORÍA ---
 st.markdown(
@@ -366,4 +1102,3 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
-
