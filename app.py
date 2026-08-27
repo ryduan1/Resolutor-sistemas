@@ -711,7 +711,7 @@ else:
 num_nodos = st.sidebar.number_input(
     "Número de Nodos (N)",
     min_value=1,
-    max_value=150,
+    max_value=500,
     value=default_nodos,
     step=1,
 )
