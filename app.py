@@ -425,6 +425,135 @@ def graficar_reticulado_rigidez(nodes_df, bars_df, resultado, escala):
     return fig
 
 
+# ==============================================================================
+# --- GRÁFICO PARA EL MÉTODO DE LOS NODOS (MATRIZ MANUAL) ---
+# ==============================================================================
+
+def _extraer_nodos_de_barra(nombre, num_nodos):
+    """Intenta extraer el par de nodos (i, j) a partir del nombre de una barra,
+    p.ej. 'B12' -> (1, 2). Requiere ids de nodo de un solo dígito si num_nodos < 10;
+    si no puede determinarlo de forma inequívoca, devuelve None."""
+    digitos = re.sub(r"[^0-9]", "", str(nombre))
+    if not digitos:
+        return None
+    if num_nodos < 10:
+        if len(digitos) == 2:
+            return int(digitos[0]), int(digitos[1])
+        return None
+    grupos = re.findall(r"\d+", str(nombre))
+    if len(grupos) == 2:
+        return int(grupos[0]), int(grupos[1])
+    return None
+
+
+def _extraer_nodo_de_reaccion(nombre):
+    """Extrae (nodo, eje) de un nombre de reacción, p.ej. 'R4x' -> (4, 'x'),
+    'R1' -> (1, None) [eje no especificado -> se asume apoyo vertical]."""
+    m = re.match(r"^[^\d]*(\d+)\s*([xXyY]?)$", str(nombre).strip())
+    if not m:
+        return None, None
+    nodo = int(m.group(1))
+    eje = m.group(2).lower() if m.group(2) else None
+    return nodo, eje
+
+
+def graficar_metodo_nodos(coords_df, barras, reacciones, x, num_nodos):
+    """Grafica la geometría del reticulado resuelto por el Método de los Nodos
+    (matriz manual), coloreando cada barra según su nivel de solicitación y
+    diferenciando Tracción/Compresión. Devuelve None si no hay datos graficables."""
+    coords = {}
+    for _, row in coords_df.iterrows():
+        try:
+            nid = int(row["id"])
+            nx, ny = float(row["x"]), float(row["y"])
+        except (ValueError, TypeError):
+            continue
+        if np.isnan(nx) or np.isnan(ny):
+            continue
+        coords[nid] = (nx, ny)
+
+    barras_plot = []
+    for idx, nombre in enumerate(barras):
+        par = _extraer_nodos_de_barra(nombre, num_nodos)
+        if par is None:
+            continue
+        i, j = par
+        if i not in coords or j not in coords:
+            continue
+        xi, yi = coords[i]
+        xj, yj = coords[j]
+        if xi == xj and yi == yj:
+            continue
+        barras_plot.append({"nombre": nombre, "xi": xi, "yi": yi, "xj": xj, "yj": yj, "valor": float(x[idx])})
+
+    if not barras_plot:
+        return None
+
+    fig, ax = plt.subplots(figsize=(8.5, 7))
+
+    valores_abs = [abs(b["valor"]) for b in barras_plot]
+    vmax = max(valores_abs) if valores_abs and max(valores_abs) > 0 else 1.0
+    cmap = plt.get_cmap("RdYlBu_r")
+    norm = mcolors.Normalize(vmin=0.0, vmax=vmax)
+
+    for b in barras_plot:
+        color = cmap(norm(abs(b["valor"])))
+        es_traccion = b["valor"] >= 0
+        linestyle = "-" if es_traccion else "--"
+        ax.plot(
+            [b["xi"], b["xj"]], [b["yi"], b["yj"]],
+            linestyle=linestyle, color=color, linewidth=3.2, zorder=3, solid_capstyle="round",
+        )
+        midx, midy = (b["xi"] + b["xj"]) / 2, (b["yi"] + b["yj"]) / 2
+        estado = "T" if b["valor"] > 1e-6 else ("C" if b["valor"] < -1e-6 else "N")
+        ax.annotate(
+            f"{b['nombre']} ({estado})", (midx, midy),
+            fontsize=7.5, color="#1E293B", ha="center", va="center",
+            bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.8), zorder=5,
+        )
+
+    xs_nodos = [c[0] for c in coords.values()]
+    ys_nodos = [c[1] for c in coords.values()]
+    ax.scatter(xs_nodos, ys_nodos, c="#0F172A", s=45, zorder=4)
+    for nid, (nx, ny) in coords.items():
+        ax.annotate(
+            str(nid), (nx, ny), textcoords="offset points", xytext=(7, 7),
+            fontsize=8.5, fontweight="bold", color="#0F172A", zorder=6,
+        )
+
+    for nombre_r in reacciones:
+        nodo, _eje = _extraer_nodo_de_reaccion(nombre_r)
+        if nodo in coords:
+            nx, ny = coords[nodo]
+            ax.scatter(
+                [nx], [ny], marker="^", s=170,
+                facecolor="#F59E0B", edgecolor="#78350F", linewidth=1.2, zorder=2.5,
+            )
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.82, pad=0.02)
+    cbar.set_label("Nivel de solicitación |Fuerza en Barra|", fontsize=9)
+
+    leyenda = [
+        Line2D([0], [0], linestyle="-", color="#334155", lw=3, label="Barra en Tracción (T)"),
+        Line2D([0], [0], linestyle="--", color="#334155", lw=3, label="Barra en Compresión (C)"),
+        Line2D(
+            [0], [0], marker="^", color="w", markerfacecolor="#F59E0B",
+            markeredgecolor="#78350F", markersize=11, label="Apoyo / Reacción",
+        ),
+    ]
+    ax.legend(handles=leyenda, loc="best", fontsize=8, framealpha=0.9)
+
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.set_title("Reticulado — Método de los Nodos", fontsize=11, fontweight="bold")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    return fig
+
+
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
     page_title="Solver de Reticulados | Facultad de Ingeniería UNRC",
@@ -582,7 +711,7 @@ else:
 num_nodos = st.sidebar.number_input(
     "Número de Nodos (N)",
     min_value=1,
-    max_value=200,
+    max_value=150,
     value=default_nodos,
     step=1,
 )
@@ -774,6 +903,43 @@ with tab1:
             df_b_init, key="editor_b_reticulados", use_container_width=True
         )
 
+    with st.expander("📍 Coordenadas de Nodos (opcional — habilita el gráfico)", expanded=False):
+        st.caption(
+            "Para poder graficar el reticulado, indicá la posición (X, Y) de cada "
+            "nodo. Si cargaste el ejemplo de cátedra ya vienen precargadas. Para que "
+            "una barra pueda dibujarse su nombre debe incluir los dos números de "
+            "nodo que conecta (ej. `B12` = nodo 1 y nodo 2); para una reacción, el "
+            "número de nodo donde actúa, opcionalmente seguido de `x`/`y` "
+            "(ej. `R4x`). Si el nombre no sigue ese formato, esa barra o reacción "
+            "simplemente no se dibuja."
+        )
+
+        if cargar_ejemplo and num_nodos == 6 and num_incognitas == 12:
+            coords_default = pd.DataFrame({
+                "id": [1, 2, 3, 4, 5, 6],
+                "x": [0.0, 2.0, 4.0, 4.0, 2.0, 0.0],
+                "y": [0.0, 0.0, 0.0, 2.0, 2.0, 2.0],
+            })
+        else:
+            _angulos = np.linspace(0, 2 * np.pi, num_nodos, endpoint=False)
+            coords_default = pd.DataFrame({
+                "id": list(range(1, num_nodos + 1)),
+                "x": [round(3 * np.cos(a), 2) for a in _angulos],
+                "y": [round(3 * np.sin(a), 2) for a in _angulos],
+            })
+
+        coords_df = st.data_editor(
+            coords_default,
+            key=f"editor_coords_manual_{num_nodos}_{cargar_ejemplo}",
+            num_rows="fixed",
+            use_container_width=True,
+            column_config={
+                "id": st.column_config.NumberColumn("Nodo", disabled=True),
+                "x": st.column_config.NumberColumn("X", format="%.3f"),
+                "y": st.column_config.NumberColumn("Y", format="%.3f"),
+            },
+        )
+
     # --- BOTÓN DE RESOLUCIÓN Y EVALUACIÓN ---
     if st.button(
         "RESOLVER EQUILIBRIO DEL RETICULADO",
@@ -829,6 +995,22 @@ with tab1:
                     st.write("#### 🎯 Solución del Vector Incógnita $x$:")
                     st.table(res_df)
 
+                    st.write("#### 📈 Representación Gráfica del Reticulado")
+                    fig_manual = graficar_metodo_nodos(coords_df, barras, reacciones, x, num_nodos)
+                    if fig_manual is not None:
+                        st.pyplot(fig_manual)
+                        st.caption(
+                            "Color: azul (baja solicitación) → rojo (alta solicitación). "
+                            "Trazo continuo = Tracción, discontinuo = Compresión. Los "
+                            "triángulos naranjas representan los apoyos según las reacciones."
+                        )
+                    else:
+                        st.info(
+                            "No fue posible graficar: completá las coordenadas de los "
+                            "nodos en el panel de arriba y verificá que los nombres de "
+                            "barra sigan el formato `B<nodo_i><nodo_j>` (ej. `B12`)."
+                        )
+
                 else:
                     st.warning(
                         "⚠️ **LOGRA EL EQUILIBRIO — Infinitas Soluciones (Sistema Hiperestático)**"
@@ -849,6 +1031,23 @@ with tab1:
                     })
                     st.write("#### 🎯 Solución Particular Calculada:")
                     st.table(res_df)
+
+                    st.write("#### 📈 Representación Gráfica del Reticulado")
+                    fig_manual = graficar_metodo_nodos(coords_df, barras, reacciones, x, num_nodos)
+                    if fig_manual is not None:
+                        st.pyplot(fig_manual)
+                        st.caption(
+                            "Color: azul (baja solicitación) → rojo (alta solicitación). "
+                            "Trazo continuo = Tracción, discontinuo = Compresión (según "
+                            "la solución particular obtenida). Los triángulos naranjas "
+                            "representan los apoyos según las reacciones."
+                        )
+                    else:
+                        st.info(
+                            "No fue posible graficar: completá las coordenadas de los "
+                            "nodos en el panel de arriba y verificá que los nombres de "
+                            "barra sigan el formato `B<nodo_i><nodo_j>` (ej. `B12`)."
+                        )
             else:
                 st.error(
                     "❌ **NO LOGRA EL EQUILIBRIO — Sin Solución (Sistema Incompatible / Hipostático)**"
@@ -1102,3 +1301,4 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
